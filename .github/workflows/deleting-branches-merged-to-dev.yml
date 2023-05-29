@@ -1,0 +1,14 @@
+name: Deleting Branches that have merged into Dev
+run-name: ${{ github.actor }} has merged a branch into dev and that branch is being deleted.
+on:
+  pull_request:
+    branches: [dev]
+    types: [closed]
+jobs:
+  delete-branch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: delete branch
+        uses: SvanBoxel/delete-merged-branch@main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

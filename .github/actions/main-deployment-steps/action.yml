@@ -1,0 +1,88 @@
+name: Main Deploy Actions
+description: Triggered by deploy to run front and back end deployment
+inputs:
+  ssh_username:
+    description: username
+    required: true
+  ssh_key:
+    description: key
+    required: true
+  ssh_hostname:
+    description: target hostname
+    required: true
+  github_token:
+    description: Github token value for getting containers
+    required: true
+  deployment:  # id of input
+    description: 'frontend or backend'
+    required: true
+  ports:
+    description: 'port mapping eg. 9001:9000'
+    required: true
+  env_file:
+    description: A file with all environment variables
+    required: true
+
+
+runs:
+  using: "composite"
+  steps:
+    - name: Configure SSH
+      run : |
+        mkdir -p ~/.ssh/
+        echo "${{ inputs.ssh_key }}" > ~/.ssh/staging.key
+        chmod 600 ~/.ssh/staging.key
+        cat >>~/.ssh/config <<END
+        Host aws
+          HostName ${{ inputs.ssh_hostname }}
+          User ${{ inputs.ssh_username }}
+          IdentityFile ~/.ssh/staging.key
+          StrictHostKeyChecking no
+        END
+      shell: bash
+
+    - name: Log in to registry
+      run: ssh aws 'sudo echo ${{ inputs.github_token}} |  sudo docker login ghcr.io -u ThomasHankins --password-stdin'
+      shell: bash
+    
+    - name: Pull latest ${{ inputs.deployment }} docker image
+      run: ssh aws 'sudo docker pull -q ghcr.io/thomashankins/clientdek/clientdek-${{ inputs.deployment }}:dev'
+      shell: bash
+
+    - name: Add prod tag to latest
+      run: ssh aws 'sudo docker image tag ghcr.io/thomashankins/clientdek/clientdek-${{ inputs.deployment }}:dev ghcr.io/thomashankins/clientdek/clientdek-${{ inputs.deployment }}:prod'
+      shell: bash
+
+    - name: Push tag to registry
+      run: ssh aws 'sudo docker push ghcr.io/thomashankins/clientdek/clientdek-${{ inputs.deployment }}:prod'
+      shell: bash
+
+    - name: Stop current prod container
+      run: ssh aws 'sudo docker ps -q --filter name="^${{ inputs.deployment }}" | xargs -r sudo docker stop'
+      shell: bash
+
+    - name: create env file
+      run: echo "${{ inputs.env_file }}" > .env.production.${{ inputs.deployment }}
+      shell: bash
+
+    - name: scp file in
+      run: scp .env.production.${{ inputs.deployment }} aws:clientdek
+      shell: bash
+
+    - name: Run container as prod
+      run: | 
+          ssh aws '
+          cd clientdek;    
+          docker run \
+            --detach \
+            --publish ${{ inputs.ports }} \
+            --name ${{ inputs.deployment }} \
+            --rm \
+            --env-file ./.env.production.${{ inputs.deployment }} \
+            ghcr.io/thomashankins/clientdek/clientdek-${{ inputs.deployment }}:prod'
+      shell: bash
+
+    - name: Delete env file
+      run: |
+          ssh aws 'rm clientdek/.env.production.${{ inputs.deployment }}'
+      shell: bash

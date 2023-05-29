@@ -1,0 +1,212 @@
+name: Post Dev Merge Tasks
+on:
+  pull_request:
+    types:
+      - "closed"
+    branches: [dev]
+  workflow_dispatch:
+
+env:
+  CR_PAT: ${{ secrets.GITHUB_TOKEN }}
+  SSH_USER: ${{ secrets.USER_NAME }}
+  SSH_KEY: ${{ secrets.AWS_PRIVATE_KEY }}
+  SSH_HOST: ${{ secrets.HOSTNAME }}
+  DB_PASS:  ${{ secrets.DEV_DB_PASSWORD}}
+  HEAD_BRANCH: ${{ github.head_ref }}
+
+jobs:
+
+  deploy-backend:
+    runs-on: ubuntu-latest
+    env: 
+      env_file: |
+          DEBUG=True
+          DB_NAME=production
+          DB_USER=postgres
+          DB_URL=${{ vars.DB_URL }}
+          DB_PASSWORD=${{ secrets.DEV_DB_PASSWORD }}
+          DJANGO_SECRET_KEY=${{ secrets.DJANGO_SECRET_KEY }}
+          SENDGRID_API_KEY=${{ secrets.SENDGRID_API_KEY }}
+          REDIS_PASSWORD=${{ secrets.REDIS_PASSWORD }}
+          AWS_ACCESS_KEY_ID=${{ vars.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Making the branch name lower case
+        id: lowerCase
+        run: |
+          echo "lowerCaseBranchName=$( echo "${{ env.HEAD_BRANCH }}" | awk '{ print tolower($0) }' )" >> $GITHUB_OUTPUT
+      
+      - name: Cache register
+        id: cache-docker
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-backend-${{ hashFiles('./back-end/clientdek/Dockerfile') }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-backend-
+
+      - name: Cache Hit or Miss
+        run: echo "Cache found ${{ steps.cache-docker.outputs.cache-hit }}"
+
+      - name: Build and push docker image
+        uses: docker/build-push-action@v3
+        with:
+          context: ./back-end/clientdek
+          file: ./back-end/clientdek/Dockerfile
+          builder: ${{ steps.buildx.outputs.name }}
+          push: true
+          tags: ghcr.io/thomashankins/clientdek/clientdek-backend:${{ steps.lowerCase.outputs.lowerCaseBranchName }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new
+        env:
+          DOCKER_BUILDKIT: 1
+
+      - name: Move Cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+
+
+      # - name: Rebuilding the backend image
+      #   run: |
+      #     docker build -t back-end-image-from-dev-branch-post-merge ./back-end/clientdek
+
+      # - name: Re Tag the back-end-image-from-dev-branch-post-merge as my newly merged branch image
+      #   run: |
+      #     docker tag back-end-image-from-dev-branch-post-merge ghcr.io/thomashankins/clientdek/clientdek-backend:${{ steps.lowerCase.outputs.lowerCaseBranchName }}
+
+      # - name: Push the newly tagged image and continue with deployment
+      #   run: |
+      #     docker push ghcr.io/thomashankins/clientdek/clientdek-backend:${{ steps.lowerCase.outputs.lowerCaseBranchName }} 
+
+      - name: Deploy Backend
+        uses: ./.github/actions/dev-deployment-steps
+        with:
+          deployment: backend
+          ports: 8081:8080
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          ssh_username: $SSH_USER
+          ssh_key: $SSH_KEY
+          ssh_hostname: $SSH_HOST
+          env_file: $env_file
+          branch: ${{ steps.lowerCase.outputs.lowerCaseBranchName }} 
+
+  deploy-frontend:
+    runs-on: ubuntu-latest
+    needs: deploy-backend
+    env: 
+      env_file: |
+        ENVIRONMENT=development
+        API_URL=dev.clientdek.com
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Making the branch name lower case
+        id: lowerCase
+        run: |
+          echo "lowerCaseBranchName=$( echo "${{ env.HEAD_BRANCH }}" | awk '{ print tolower($0) }' )" >> $GITHUB_OUTPUT
+
+      - name: Cache register
+        id: cache-docker
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-frontend-${{ hashFiles('./front-end/Dockerfile') }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-frontend-
+
+      - name: Cache Hit or Miss
+        run: echo "Cache found ${{ steps.cache-docker.outputs.cache-hit }}"
+
+      - name: Build and push docker image
+        uses: docker/build-push-action@v3
+        with:
+          context: ./front-end/
+          file: ./front-end/Dockerfile
+          builder: ${{ steps.buildx.outputs.name }}
+          push: true
+          tags: ghcr.io/thomashankins/clientdek/clientdek-frontend:${{ steps.lowerCase.outputs.lowerCaseBranchName }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new
+        env:
+          DOCKER_BUILDKIT: 1
+
+      - name: Move Cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+
+      # - name: Rebuilding the backend image
+      #   run: |
+      #     docker build -t front-end-image-from-dev-branch-post-merge ./front-end
+
+      # - name: Re Tag the front-end-image-from-dev-branch-post-merge as my newly merged branch image
+      #   run: |
+      #     docker tag front-end-image-from-dev-branch-post-merge ghcr.io/thomashankins/clientdek/clientdek-frontend:${{ steps.lowerCase.outputs.lowerCaseBranchName }}
+
+      # - name: Push the newly tagged image and continue with deployment
+      #   run: |
+      #     docker push ghcr.io/thomashankins/clientdek/clientdek-frontend:${{ steps.lowerCase.outputs.lowerCaseBranchName }} 
+
+      - name: Deploy Frontend
+        uses: ./.github/actions/dev-deployment-steps
+        with:
+          deployment: frontend
+          ports: 9001:9000
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          ssh_username: $SSH_USER
+          ssh_key: $SSH_KEY
+          ssh_hostname: $SSH_HOST
+          env_file: $env_file  
+          branch: ${{ steps.lowerCase.outputs.lowerCaseBranchName }}
+
+  prune-old:
+    runs-on: ubuntu-latest
+    needs: [deploy-backend,deploy-frontend]
+    steps:
+      - name: Configure SSH
+        run : |
+          mkdir -p ~/.ssh/
+          echo "$SSH_KEY" > ~/.ssh/staging.key
+          chmod 600 ~/.ssh/staging.key
+          cat >>~/.ssh/config <<END
+          Host staging
+            HostName $SSH_HOST
+            User $SSH_USER
+            IdentityFile ~/.ssh/staging.key
+            StrictHostKeyChecking no
+          END
+        env:
+          SSH_USER: ${{ secrets.USER_NAME }}
+          SSH_KEY: ${{ secrets.AWS_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.HOSTNAME }}
+      - name: Prune images without containers
+        run: ssh staging 'sudo docker image prune -f'
+        

@@ -1,0 +1,15 @@
+version: '3'
+services:
+  backend-server:
+    image: ghcr.io/thomashankins/clientdek-backend:latest
+    build: ./back-end/clientdek
+
+  frontend-server:
+    image: ghcr.io/thomashankins/clientdek-frontend:latest
+    build: 
+      context: ./front-end
+      args: 
+        API_URL: ${API_URL}
+        ENVIRONMENT: ${ENVIRONMENT}
+
+

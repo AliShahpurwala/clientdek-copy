@@ -1,0 +1,132 @@
+name: Post Merge ensuring cache is up to date
+on:  
+  push:
+    branches: [dev]
+
+jobs:
+  create-pip-cache:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the code
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Creating the cache, won't create if it exists
+        id: cache-pip
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Installing dependencies if the cache doesn't hit
+        if: ${{ steps.cache-pip.outputs.cache-hit != 'true' }}
+        run: pip install -r ./back-end/clientdek/requirements.txt
+
+  create-node-cache:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the code
+        uses: actions/checkout@v3
+
+      - name: Setup Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: '14.x'
+
+      - name: Creating the cache, won't create if it exists
+        id: cache-node
+        uses: actions/cache@v3
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Installing dependencies if the cache doesn't hit
+        if: ${{ steps.cache-pip.outputs.cache-hit != 'true' }}
+        run: cd front-end && npm install
+
+  create-backend-docker-cache:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the code
+        uses: actions/checkout@v3
+
+      - name: Setup Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Cache register
+        id: cache-docker
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-backend-${{ hashFiles('./back-end/clientdek/Dockerfile') }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-backend-
+
+      - name: Build and push docker image
+        if: ${{ steps.cache-docker.outputs.cache-hit != 'true' }}
+        uses: docker/build-push-action@v3
+        with:
+          context: ./back-end/clientdek
+          file: ./back-end/clientdek/Dockerfile
+          builder: ${{ steps.buildx.outputs.name }}
+          push: false
+          tags: ghcr.io/thomashankins/clientdek/clientdek-backend
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new
+        env:
+          DOCKER_BUILDKIT: 1
+
+      - name: Move Cache
+        if: ${{ steps.cache-docker.outputs.cache-hit != 'true' }}
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+  create-frontend-docker-cache:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the code
+        uses: actions/checkout@v3
+
+      - name: Setup Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Cache register
+        id: cache-docker
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-frontend-${{ hashFiles('./front-end/Dockerfile') }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-frontend-
+
+      - name: Build and push docker image
+        if: ${{ steps.cache-docker.outputs.cache-hit != 'true' }}
+        uses: docker/build-push-action@v3
+        with:
+          context: ./front-end/
+          file: ./front-end/Dockerfile
+          builder: ${{ steps.buildx.outputs.name }}
+          push: false
+          tags: ghcr.io/thomashankins/clientdek/clientdek-frontend
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new
+        env:
+          DOCKER_BUILDKIT: 1
+
+      - name: Move Cache
+        if: ${{ steps.cache-docker.outputs.cache-hit != 'true' }}
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+

@@ -1,0 +1,284 @@
+name: Dev Pre-Merge Steps
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+    branches: [dev]
+  workflow_dispatch:
+
+env:
+  CR_PAT: ${{ secrets.GITHUB_TOKEN }}
+  SSH_USER: ${{ secrets.USER_NAME }}
+  SSH_KEY: ${{ secrets.AWS_PRIVATE_KEY }}
+  SSH_HOST: ${{ secrets.HOSTNAME }}
+  DB_PASS:  ${{ secrets.DEV_DB_PASSWORD}}
+  IMAGE_NAME: clientdek
+  BRANCH_NAME: ${{ github.head_ref }}
+
+
+jobs:
+  lint-frontend:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '14.x'
+
+    - name: Cache node modules
+      id: cache-npm
+      uses: actions/cache@v3
+      with:
+        path: ~/.npm
+        key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+        restore-keys: ${{ runner.os }}-node-
+
+    - name: List the state of node modules
+      run: echo "Node cache found ${{ steps.cache-npm.outputs.cache-hit }}"
+  
+    - name: Install dependencies
+      run: cd front-end && npm install
+      
+    - name: Run linter and save output as an artifact
+      run: |
+        touch lint-report.txt && cd front-end && npx eslint . > ../lint-report.txt
+      if: always()
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: linter-report
+        path: lint-report.txt
+
+  pylint-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Cache pip packages
+        id: cache-pip
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Checking existence of pip cache
+        run: echo "Cache exists ${{ steps.cache-pip.outputs.cache-hit }}"
+  
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r ./back-end/clientdek/requirements.txt
+          pip install pylint
+
+      - name: Run linter and save output as an artifact
+        run: |
+          touch pylint-report.txt && pylint --exit-zero --disable=too-many-arguments back-end/clientdek/src --output-format=parseable > pylint-report.txt 
+        if: always()
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: linter-report
+          path: ./pylint-report.txt
+
+  build-front-end:
+    runs-on: ubuntu-latest
+    needs: lint-frontend
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v2
+      
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Making the repo name and branch name lower case
+        id: lowerCase
+        run: |
+          echo "lowerCaseBranchName=$( echo "${{ env.BRANCH_NAME }}" | awk '{ print tolower($0) }' )" >> $GITHUB_OUTPUT
+          echo "lowerCaseRepoName=$( echo "${{ github.repository }}" | awk '{ print tolower($0) }' )" >> $GITHUB_OUTPUT
+
+      - name: Docker Cache
+        id: cache-docker 
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-frontend-${{ hashFiles('./front-end/Dockerfile') }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-frontend-
+
+
+      - name: Build Docker image
+        env:
+          DOCKER_BUILDKIT: 1
+        uses: docker/build-push-action@v3
+        with:
+          context: ./front-end
+          file: ./front-end/Dockerfile
+          push: true
+          tags: ghcr.io/${{ steps.lowerCase.outputs.lowerCaseRepoName }}/${{ env.IMAGE_NAME }}-frontend:${{ steps.lowerCase.outputs.lowerCaseBranchName }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new
+          
+      - name: Move Cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+
+  build-back-end:
+    runs-on: ubuntu-latest
+    needs: pylint-backend
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Making the repo name and branch name lower case
+        id: lowerCase
+        run: |
+          echo "lowerCaseBranchName=$( echo "${{ env.BRANCH_NAME }}" | awk '{ print tolower($0) }' )" >> $GITHUB_OUTPUT
+          echo "lowerCaseRepoName=$( echo "${{ github.repository }}" | awk '{ print tolower($0) }' )" >> $GITHUB_OUTPUT
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache register
+        id: cache-docker
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-backend-${{ hashFiles('./back-end/clientdek/Dockerfile') }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-backend-
+
+      - name: Cache Hit or Miss
+        run: echo "Cache found ${{ steps.cache-docker.outputs.cache-hit }}"
+
+      - name: Build and push docker image
+        uses: docker/build-push-action@v3
+        with:
+          context: ./back-end/clientdek
+          file: ./back-end/clientdek/Dockerfile
+          builder: ${{ steps.buildx.outputs.name }}
+          push: true
+          tags: ghcr.io/${{ steps.lowerCase.outputs.lowerCaseRepoName }}/${{ env.IMAGE_NAME }}-backend:${{ steps.lowerCase.outputs.lowerCaseBranchName }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new
+        env:
+          DOCKER_BUILDKIT: 1
+
+      - name: Move Cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+
+  test-back-end:
+    needs: build-back-end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Making the repo name and branch name lower case
+        id: lowerCase
+        run: |
+          echo "lowerCaseBranchName=$( echo "${{ env.BRANCH_NAME }}" | awk '{ print tolower($0) }' )" >> $GITHUB_OUTPUT
+          echo "lowerCaseRepoName=$( echo "${{ github.repository }}" | awk '{ print tolower($0) }' )" >> $GITHUB_OUTPUT
+
+      - name: Pull the pre-built container
+        run: docker pull ghcr.io/${{ steps.lowerCase.outputs.lowerCaseRepoName }}/${{ env.IMAGE_NAME }}-backend:${{ steps.lowerCase.outputs.lowerCaseBranchName }}
+
+      - name: Running the backend container
+        run: |
+          docker network create test-network
+          docker run -d -p 8080:8080 -e DEBUG=True -e DB_NAME=production -e DB_USER=postgres \
+           -e DB_URL=${{ vars.DB_URL }} \
+           -e AWS_ACCESS_KEY_ID=${{ vars.AWS_ACCESS_KEY_ID }} \
+           -e AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} \
+           -e DB_PASSWORD=${{ secrets.DEV_DB_PASSWORD }} \
+           -e DJANGO_SECRET_KEY=${{ secrets.DJANGO_SECRET_KEY }} \
+           -e SENDGRID_API_KEY=${{ secrets.SENDGRID_API_KEY }} \
+           -e REDIS_PASSWORD=${{ secrets.REDIS_PASSWORD }} \
+           --network test-network \
+           --name dev-backend-testing-container ghcr.io/${{ steps.lowerCase.outputs.lowerCaseRepoName }}/${{ env.IMAGE_NAME }}-backend:${{ steps.lowerCase.outputs.lowerCaseBranchName }}
+
+
+      - name: Build the test suite image
+        run:  docker build -t dev-backend-test-suite ./back-end/clientdek/testing
+
+      - name: Checking out the status of the backend container
+        run: docker logs dev-backend-testing-container
+
+      - name: Running the test container (Expecting Failure)
+        run: |
+          docker run --network test-network -e TEST_API_KEY=136ffd523d81498e80b7184bd0af9667 \
+           -e TEST_API_KEY_ADMIN=28c59ccb6e6845e0899f57145b76ea9b dev-backend-test-suite:latest
+           
+      - name: Setup python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+        
+      - name: Install requests dependency needed for the Test Suite
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests python-dotenv
+
+      - name: Create testing report log
+        run: cd ./back-end/clientdek/testing && touch testing-report.txt
+
+      - name: Run the tests
+        run: |
+          cd ./back-end/clientdek/testing && python run_tests.py ./tests.json http://localhost: --port 8080
+        env:
+          TEST_API_KEY: 136ffd523d81498e80b7184bd0af9667
+          TEST_API_KEY_ADMIN: 28c59ccb6e6845e0899f57145b76ea9b
+
+      - name: Rename testing report
+        run: mv ./back-end/clientdek/testing/testing-report.txt ./back-end/clientdek/testing/testing-report-$(date +"%Y-%m-%d-%H-%M").txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: Test-Report
+          path: ./back-end/clientdek/testing/testing-report*
+
+      - name: Stopping the backend container
+        run: |
+          docker stop dev-backend-testing-container
+          docker network rm test-network
+

@@ -1,0 +1,96 @@
+name: DEV Deploy Actions
+description: Triggered by deploy to run front and back end deployment
+inputs:
+  ssh_username:
+    description: username
+    required: true
+  ssh_key:
+    description: key
+    required: true
+  ssh_hostname:
+    description: target hostname
+    required: true
+  github_token:
+    description: Github token value for getting containers
+    required: true
+  deployment:  # id of input
+    description: 'frontend or backend'
+    required: true
+  ports:
+    description: 'port mapping eg. 9001:9000'
+    required: true
+  env_file:
+    description: A file with all environment variables
+    required: true
+  branch:
+    description: The branch that was merged into dev
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Configure SSH
+      run : |
+        mkdir -p ~/.ssh/
+        echo "${{ inputs.ssh_key }}" > ~/.ssh/staging.key
+        chmod 600 ~/.ssh/staging.key
+        cat >>~/.ssh/config <<END
+        Host aws
+          HostName ${{ inputs.ssh_hostname }}
+          User ${{ inputs.ssh_username }}
+          IdentityFile ~/.ssh/staging.key
+          StrictHostKeyChecking no
+        END
+      shell: bash
+
+    - name: Log in to registry
+      run: ssh aws echo '${{ inputs.github_token }} |  docker login ghcr.io -u ThomasHankins --password-stdin'
+      shell: bash
+
+    - name: Pull latest ${{ inputs.deployment }} docker image
+      run: ssh aws 'docker pull -q ghcr.io/thomashankins/clientdek/clientdek-${{ inputs.deployment }}:${{ inputs.branch }}'
+      shell: bash
+
+    - name: Add dev tag to image
+      run: ssh aws 'docker tag ghcr.io/thomashankins/clientdek/clientdek-${{ inputs.deployment }}:${{ inputs.branch }} ghcr.io/thomashankins/clientdek/clientdek-${{ inputs.deployment }}:dev'
+
+      shell: bash
+
+    - name: Push tag to registry
+      run: ssh aws 'docker push ghcr.io/thomashankins/clientdek/clientdek-${{ inputs.deployment }}:dev'
+      shell: bash
+
+    - name: Remove ${{ inputs.branch }} image from AWS EC2
+      run: ssh aws 'docker rmi ghcr.io/thomashankins/clientdek/clientdek-${{ inputs.deployment }}:${{ inputs.branch }}'
+      shell: bash
+
+    - name: Stop existing ${{ inputs.deployment }} DEV container
+      run: ssh aws 'docker ps -q --filter name="dev-${{ inputs.deployment }}" | xargs -r docker stop'
+      shell: bash
+
+    - name: create env file
+      run: echo "${{ inputs.env_file }}" > .env.dev.${{ inputs.deployment }}
+      shell: bash
+
+    - name: scp file in
+      run: scp .env.dev.${{ inputs.deployment }} aws:clientdek
+      shell: bash
+
+    - name: Run new container
+      run: | 
+          ssh aws '
+          cd clientdek;    
+          docker run \
+            --detach \
+            --publish ${{ inputs.ports }} \
+            --name dev-${{ inputs.deployment }} \
+            --rm \
+            --env-file ./.env.dev.${{ inputs.deployment }} \
+            --network clientdek-network \
+            ghcr.io/thomashankins/clientdek/clientdek-${{ inputs.deployment }}:dev'
+      shell: bash
+
+    - name: Delete env file
+      run: |
+        ssh aws 'rm clientdek/.env.dev.${{ inputs.deployment }}'
+      shell: bash
